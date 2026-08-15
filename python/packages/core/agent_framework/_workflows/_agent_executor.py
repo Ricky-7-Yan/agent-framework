@@ -205,6 +205,15 @@ class AgentExecutor(Executor):
         This is the standard path: extend cache with provided messages; if should_respond
         run the agent and emit an AgentExecutorResponse downstream.
         """
+        if any(
+            content.type in {"function_call", "function_result"}
+            for message in request.messages
+            for content in message.contents
+        ):
+            # Explicit function history and a service-side continuation token are two
+            # competing representations of the same conversation.
+            self._session.service_session_id = None
+
         self._cache.extend(request.messages)
 
         if request.should_respond:

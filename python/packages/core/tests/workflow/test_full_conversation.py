@@ -434,15 +434,6 @@ class _FullHistoryReplayCoordinator(Executor):
         )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Tracks the executor-layer half of #3295: AgentExecutor should clear service_session_id "
-        "when handed a full prior conversation. The wire-level 'Duplicate item' API error is "
-        "already closed by the chat-client strip in #3295; this xfail covers the defense-in-depth "
-        "follow-up that makes the executor wiring reflect intent."
-    ),
-    strict=True,
-)
 async def test_run_request_with_full_history_clears_service_session_id() -> None:
     """Replaying a full conversation (including function calls) via AgentExecutorRequest must
     clear service_session_id so the API does not receive both previous_response_id and the
@@ -470,6 +461,48 @@ async def test_run_request_with_full_history_clears_service_session_id() -> None
     # "Duplicate item found" because the same function-call IDs appear in both
     # previous_response_id (server-stored) and the explicit input messages.
     assert spy_agent._captured_service_session_id is None  # pyright: ignore[reportPrivateUsage]
+
+
+class _MessageOnlyCoordinator(Executor):
+    """Coordinator that sends a new message to an executor with an existing service session."""
+
+    def __init__(self, *, target_exec: AgentExecutor, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._target_exec = target_exec
+
+    @handler
+    async def handle(
+        self,
+        response: AgentExecutorResponse,
+        ctx: WorkflowContext[AgentExecutorRequest, Any],
+    ) -> None:
+        del response
+        self._target_exec._session.service_session_id = "resp_PREVIOUS_RUN"  # pyright: ignore[reportPrivateUsage]
+        await ctx.send_message(
+            AgentExecutorRequest(messages=[Message(role="user", contents=["follow-up"])], should_respond=True),
+            target_id=self._target_exec.id,
+        )
+
+
+async def test_run_request_with_new_message_preserves_service_session_id() -> None:
+    """A new request message should continue the executor's service-side conversation."""
+    source_agent = _SimpleAgent(id="source_agent", name="SourceAgent", reply_text="ready")
+    source_exec = AgentExecutor(source_agent, id="source_agent")
+
+    spy_agent = _SessionIdCapturingAgent(id="message_spy_agent", name="MessageSpyAgent")
+    spy_exec = AgentExecutor(spy_agent, id="message_spy_agent")
+    coordinator = _MessageOnlyCoordinator(id="message_coord", target_exec=spy_exec)
+
+    wf = (
+        WorkflowBuilder(start_executor=source_exec, output_from=[coordinator])
+        .add_edge(source_exec, coordinator)
+        .add_edge(coordinator, spy_exec)
+        .build()
+    )
+
+    result = await wf.run("initial prompt")
+    assert result.get_outputs() is not None
+    assert spy_agent._captured_service_session_id == "resp_PREVIOUS_RUN"  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_from_response_preserves_service_session_id() -> None:
